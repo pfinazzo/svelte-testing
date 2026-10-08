@@ -1,46 +1,74 @@
-import { writable, derived } from "svelte/store";
+import { derived, writable, type Readable } from "svelte/store";
 import type {
-    // core
-    Todo,
-    TodoList,
-    TodoStatusFilter,
-    TodoStatus,
-
-    // helper payloads
-    AddTodoPayload,
-    SetTodoStatusPayload,
-    RemoveTodoPayload
+  AddTodoParams,
+  RemoveTodoParams,
+  ReplaceTodosParams,
+  SetStatusFilterParams,
+  SetTodoStatusParams,
+  Todo,
+  TodoStatus,
+  TodoStatusFilter,
 } from "../types";
 
-// filtered directly on status
-const filteredOnStatusTodos = ({ todos, filter }: { todos: TodoList, filter: TodoStatusFilter }) => todos.filter((todo) => todo.status === filter);
+/*
+  The writable stores stay private.
 
-// branches off to show all todos if the filter is "all" since "all" not a todo status
-const toVisibleTodos = ([$todos, $filter]: [TodoList, TodoStatusFilter]) => $filter === "all" ? $todos : filteredOnStatusTodos({ todos: $todos, filter: $filter });
+  `writable` gives back an object with set, update and subscribe. If that
+  object were exported, any component could write `$todos = []` and wipe the
+  list without going through the functions below. So the writable lives only
+  in this file, and what gets exported under the name `todos` is an object
+  with just `subscribe`. Components can still read it as `$todos`, because
+  Svelte only needs `subscribe` for that. Writing to it from a component is
+  now a compile error. Every change comes through a named function here.
+*/
+const todoStore = writable<Todo[]>([]);
+const statusFilterStore = writable<TodoStatusFilter>("all");
 
-const IS_OPEN: Record<TodoStatus, boolean> = {
-    todo: true,
-    in_progress: true,
-    done: false,
-}
+export const todos: Readable<Todo[]> = { subscribe: todoStore.subscribe };
+export const statusFilter: Readable<TodoStatusFilter> = { subscribe: statusFilterStore.subscribe };
 
-// writables
-export const todos = writable<TodoList>([]);
-export const filter = writable<TodoStatusFilter>("all");
+/*
+  Values computed from the stores above.
 
+  A derived store reruns its function whenever one of its inputs changes. The
+  list of visible todos depends on both the todos and the filter, so it takes
+  both. The open count depends only on the todos. Nothing ever sets these by
+  hand, so they cannot drift out of step with the data.
+*/
+const OPEN_BY_STATUS: Record<TodoStatus, boolean> = {
+  todo: true,
+  in_progress: true,
+  done: false,
+};
 
-// readables
-// none for now but if we had an external source (i.e. other users creating todos on your list pushed on from web socket etc) 
+const isOpen = ({ status }: Todo): boolean => OPEN_BY_STATUS[status];
 
-// derived
-export const visibleTodos = derived([todos, filter], toVisibleTodos);
-export const remainingCount = derived(todos, $todos => $todos.filter((todo) => IS_OPEN[todo.status]).length);
+export const visibleTodos = derived([todos, statusFilter], ([$todos, $statusFilter]) =>
+  $statusFilter === "all" ? $todos : $todos.filter((todo) => todo.status === $statusFilter),
+);
 
+export const openTodoCount = derived(todos, ($todos) => $todos.filter(isOpen).length);
 
-// transforms
-const toTodo = ({ text }: AddTodoPayload): Todo => ({ text, status: "todo", id: crypto.randomUUID() });
+/*
+  The only way to change todos.
 
-// update helpers
-export const addTodo = ({ text }: AddTodoPayload) => todos.update((currentTodos) => [...currentTodos, toTodo({ text })]);
-export const setStatus = ({ id, status }: SetTodoStatusPayload) => todos.update((currentTodos) => currentTodos.map(todo => todo.id === id ? { ...todo, status } : todo));
-export const removeTodo = ({ id }: RemoveTodoPayload) => todos.update((currentTodos) => currentTodos.filter(todo => todo.id !== id));
+  Each function hands `update` a callback that receives the current list and
+  returns a new one. None of them push into, splice or assign onto the list
+  they were given. That matters in Svelte 4: the store only notifies
+  subscribers when it is handed a new value, so a mutated array would leave
+  the screen stale.
+*/
+const createTodo = ({ text }: AddTodoParams): Todo => ({ id: crypto.randomUUID(), text, status: "todo" });
+
+export const addTodo = ({ text }: AddTodoParams): void =>
+  todoStore.update((current) => [...current, createTodo({ text })]);
+
+export const setTodoStatus = ({ id, status }: SetTodoStatusParams): void =>
+  todoStore.update((current) => current.map((todo) => (todo.id === id ? { ...todo, status } : todo)));
+
+export const removeTodo = ({ id }: RemoveTodoParams): void =>
+  todoStore.update((current) => current.filter((todo) => todo.id !== id));
+
+export const replaceTodos = ({ todos: next }: ReplaceTodosParams): void => todoStore.set(next);
+
+export const setStatusFilter = ({ statusFilter: next }: SetStatusFilterParams): void => statusFilterStore.set(next);
